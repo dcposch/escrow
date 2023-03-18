@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
+// A simple escrow to settle Balaji and JC Medlock's bet about hyperinflation.
+// Written almost entirely by GPT4.
 contract BetEscrow {
     enum ContractState {
         Collecting,
-        Holding,
+        Locked,
         Settled,
         Failed
     }
@@ -39,62 +41,44 @@ contract BetEscrow {
         USDC = IERC20(_USDCAddress);
         WBTC = IERC20(_WBTCAddress);
 
+        // Fetch oracle price. Ensure that it's valid and not too old.
         (, int256 price, , uint256 updatedAt, ) = priceFeed.latestRoundData();
-        if (price < 0 || block.timestamp > updatedAt + 1 days) {
-            state = ContractState.Failed;
-        } else {
-            startingPrice = uint256(price);
-            state = ContractState.Collecting;
-        }
+        require(
+            price > 0 && block.timestamp < updatedAt + 1 days,
+            "Invalid oracle data"
+        );
+        startingPrice = uint256(price);
+
+        state = ContractState.Collecting;
     }
 
-    function depositUSDC() external {
-        require(state == ContractState.Collecting, "Wrong state");
-        require(msg.sender == bettorA, "Only bettor A can deposit USDC");
-        uint256 amount = 1e6 * 1e6; // 1 million USDC (assuming 6 decimals)
-        USDC.transferFrom(msg.sender, address(this), amount);
-        checkHoldingState();
-    }
-
-    function depositWBTC() external {
-        require(state == ContractState.Collecting, "Wrong state");
-        require(msg.sender == bettorB, "Only bettor B can deposit WBTC");
-        uint256 amount = 1e8; // 1 WBTC (assuming 8 decimals)
-        WBTC.transferFrom(msg.sender, address(this), amount);
-        checkHoldingState();
-    }
-
-    function checkHoldingState() internal {
+    // Called after Bettor A has deposited USDC and Bettor B has deposited WBTC.
+    // This locks in the bet until the settlement date.
+    function lockDeposits() external {
         if (
             USDC.balanceOf(address(this)) >= 1e6 * 1e6 &&
             WBTC.balanceOf(address(this)) >= 1e8
         ) {
-            state = ContractState.Holding;
+            state = ContractState.Locked;
         }
     }
 
+    // Called if one of the parties fails to deposit timely, by the other party.
     function fail() external {
         require(state == ContractState.Collecting, "Wrong state");
         require(block.timestamp > deadline, "Deadline not reached yet");
         state = ContractState.Failed;
+
+        uint256 amountA = USDC.balanceOf(address(this));
+        USDC.transfer(bettorA, amountA);
+
+        uint256 amountB = WBTC.balanceOf(address(this));
+        WBTC.transfer(bettorB, amountB);
     }
 
-    function withdrawUSDC() external {
-        require(state == ContractState.Failed, "Wrong state");
-        require(msg.sender == bettorA, "Only bettor A can withdraw USDC");
-        uint256 amount = USDC.balanceOf(address(this));
-        USDC.transfer(bettorA, amount);
-    }
-
-    function withdrawWBTC() external {
-        require(state == ContractState.Failed, "Wrong state");
-        require(msg.sender == bettorB, "Only bettor B can withdraw WBTC");
-        uint256 amount = WBTC.balanceOf(address(this));
-        WBTC.transfer(bettorB, amount);
-    }
-
+    // Called by the victor, after the settlement date has passed.
     function settle() external {
-        require(state == ContractState.Holding, "Wrong state");
+        require(state == ContractState.Locked, "Wrong state");
         require(
             block.timestamp >= settlementDate,
             "Settlement date not reached yet"
